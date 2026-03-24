@@ -172,7 +172,7 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleReasoningDelta(evt, state)
 	case "response.reasoning_summary_text.done":
 		return resToAnthHandleBlockDone(state)
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.completed", "response.incomplete", "response.failed", "response.done":
 		return resToAnthHandleCompleted(evt, state)
 	default:
 		return nil
@@ -394,6 +394,14 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		return resToAnthHandleWebSearchDone(evt, state)
 	}
 
+	if evt.Item.Type == "function_call" {
+		if _, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]; !ok {
+			events := emitCompleteFunctionCallBlock(evt.OutputIndex, evt.Item, state)
+			events = append(events, closeCurrentBlock(state)...)
+			return events
+		}
+	}
+
 	if state.ContentBlockOpen {
 		return closeCurrentBlock(state)
 	}
@@ -461,6 +469,9 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	var events []AnthropicStreamEvent
+	if evt.Response != nil {
+		events = append(events, emitMissingResponseOutputBlocks(evt.Response, state)...)
+	}
 	events = append(events, closeCurrentBlock(state)...)
 
 	stopReason := "end_turn"
@@ -499,6 +510,72 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 		AnthropicStreamEvent{Type: "message_stop"},
 	)
 	state.MessageStopSent = true
+	return events
+}
+
+func emitMissingResponseOutputBlocks(resp *ResponsesResponse, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if resp == nil || len(resp.Output) == 0 {
+		return nil
+	}
+
+	var events []AnthropicStreamEvent
+	for outputIndex, item := range resp.Output {
+		switch item.Type {
+		case "function_call":
+			if _, ok := state.OutputIndexToBlockIdx[outputIndex]; ok {
+				continue
+			}
+			events = append(events, emitCompleteFunctionCallBlock(outputIndex, &item, state)...)
+			events = append(events, closeCurrentBlock(state)...)
+		case "web_search_call":
+			if item.Status == "completed" {
+				evt := &ResponsesStreamEvent{
+					OutputIndex: outputIndex,
+					Item:        &item,
+				}
+				events = append(events, resToAnthHandleWebSearchDone(evt, state)...)
+			}
+		}
+	}
+
+	return events
+}
+
+func emitCompleteFunctionCallBlock(outputIndex int, item *ResponsesOutput, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if item == nil {
+		return nil
+	}
+
+	var events []AnthropicStreamEvent
+	events = append(events, closeCurrentBlock(state)...)
+
+	idx := state.ContentBlockIndex
+	state.OutputIndexToBlockIdx[outputIndex] = idx
+	state.ContentBlockOpen = true
+	state.CurrentBlockType = "tool_use"
+
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &AnthropicContentBlock{
+			Type:  "tool_use",
+			ID:    fromResponsesCallID(item.CallID),
+			Name:  item.Name,
+			Input: json.RawMessage("{}"),
+		},
+	})
+
+	if item.Arguments != "" {
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_delta",
+			Index: &idx,
+			Delta: &AnthropicDelta{
+				Type:        "input_json_delta",
+				PartialJSON: item.Arguments,
+			},
+		})
+	}
+
 	return events
 }
 

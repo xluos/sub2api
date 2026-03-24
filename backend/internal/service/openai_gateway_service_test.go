@@ -1094,6 +1094,84 @@ func TestOpenAIStreamingPassthroughResponseDoneWithoutDoneMarkerStillSucceeds(t 
 	require.Equal(t, 1, result.usage.CacheReadInputTokens)
 }
 
+func TestHandleAnthropicStreamingResponse_ResponseDoneWithFunctionCall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			MaxLineSize: defaultMaxLineSize,
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: cfg}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	pr, pw := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       pr,
+		Header:     http.Header{},
+	}
+
+	go func() {
+		defer func() { _ = pw.Close() }()
+		_, _ = pw.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.2\"}}\n\n"))
+		_, _ = pw.Write([]byte("data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.2\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"glob\",\"arguments\":\"{\\\"pattern\\\":\\\"**/*.go\\\"}\"}],\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n"))
+	}()
+
+	result, err := svc.handleAnthropicStreamingResponse(resp, c, "claude-sonnet-4", "gpt-5.2", time.Now())
+	_ = pr.Close()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 11, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
+
+	body := rec.Body.String()
+	require.Contains(t, body, `"type":"tool_use"`)
+	require.Contains(t, body, `"name":"glob"`)
+	require.Contains(t, body, `"stop_reason":"tool_use"`)
+}
+
+func TestHandleAnthropicBufferedStreamingResponse_ResponseDoneTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			MaxLineSize: defaultMaxLineSize,
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: cfg}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	pr, pw := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       pr,
+		Header:     http.Header{},
+	}
+
+	go func() {
+		defer func() { _ = pw.Close() }()
+		_, _ = pw.Write([]byte("data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-5.2\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_buf_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/demo.txt\\\"}\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"))
+	}()
+
+	result, err := svc.handleAnthropicBufferedStreamingResponse(resp, c, "claude-sonnet-4", "gpt-5.2", time.Now())
+	_ = pr.Close()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 5, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+
+	body := rec.Body.String()
+	require.Contains(t, body, `"stop_reason":"tool_use"`)
+	require.Contains(t, body, `"type":"tool_use"`)
+	require.Contains(t, body, `"name":"read_file"`)
+}
+
 func TestOpenAIStreamingTooLong(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{

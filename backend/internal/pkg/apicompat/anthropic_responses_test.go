@@ -393,6 +393,96 @@ func TestStreamingToolCall(t *testing.T) {
 	assert.Equal(t, "tool_use", events[0].Delta.StopReason)
 }
 
+func TestStreamingToolCallFromOutputItemDoneWithoutAdded(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_done_1", Model: "gpt-5.2"},
+	}, state)
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item: &ResponsesOutput{
+			Type:      "function_call",
+			CallID:    "call_done_1",
+			Name:      "glob",
+			Arguments: `{"pattern":"**/*.go"}`,
+			Status:    "completed",
+		},
+	}, state)
+
+	require.Len(t, events, 3)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	assert.Equal(t, "tool_use", events[0].ContentBlock.Type)
+	assert.Equal(t, "call_done_1", events[0].ContentBlock.ID)
+	assert.Equal(t, "glob", events[0].ContentBlock.Name)
+	assert.Equal(t, "content_block_delta", events[1].Type)
+	assert.Equal(t, "input_json_delta", events[1].Delta.Type)
+	assert.Equal(t, `{"pattern":"**/*.go"}`, events[1].Delta.PartialJSON)
+	assert.Equal(t, "content_block_stop", events[2].Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.completed",
+		Response: &ResponsesResponse{
+			Status: "completed",
+			Usage:  &ResponsesUsage{InputTokens: 12, OutputTokens: 3},
+		},
+	}, state)
+
+	require.Len(t, events, 2)
+	assert.Equal(t, "message_delta", events[0].Type)
+	assert.Equal(t, "tool_use", events[0].Delta.StopReason)
+	assert.Equal(t, "message_stop", events[1].Type)
+}
+
+func TestStreamingToolCallFromResponseDoneFinalResponse(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.created",
+		Response: &ResponsesResponse{
+			ID:    "resp_done_2",
+			Model: "gpt-5.2",
+		},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "message_start", events[0].Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.done",
+		Response: &ResponsesResponse{
+			ID:     "resp_done_2",
+			Model:  "gpt-5.2",
+			Status: "completed",
+			Output: []ResponsesOutput{
+				{
+					Type:      "function_call",
+					CallID:    "call_done_2",
+					Name:      "read_file",
+					Arguments: `{"path":"/tmp/demo.txt"}`,
+				},
+			},
+			Usage: &ResponsesUsage{InputTokens: 22, OutputTokens: 4},
+		},
+	}, state)
+
+	require.Len(t, events, 5)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	assert.Equal(t, "tool_use", events[0].ContentBlock.Type)
+	assert.Equal(t, "call_done_2", events[0].ContentBlock.ID)
+	assert.Equal(t, "read_file", events[0].ContentBlock.Name)
+	assert.Equal(t, "content_block_delta", events[1].Type)
+	assert.Equal(t, `{"path":"/tmp/demo.txt"}`, events[1].Delta.PartialJSON)
+	assert.Equal(t, "content_block_stop", events[2].Type)
+	assert.Equal(t, "message_delta", events[3].Type)
+	assert.Equal(t, "tool_use", events[3].Delta.StopReason)
+	assert.Equal(t, 22, events[3].Usage.InputTokens)
+	assert.Equal(t, 4, events[3].Usage.OutputTokens)
+	assert.Equal(t, "message_stop", events[4].Type)
+}
+
 func TestStreamingReasoning(t *testing.T) {
 	state := NewResponsesEventToAnthropicState()
 
